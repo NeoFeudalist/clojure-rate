@@ -18,22 +18,26 @@
             player-b ".")))
 
 (defn get-all-players [results]
-  (set (mapcat #(vector (% :player-a) (% :player-b)) results)))
+  (-> results
+    #(vector (% :player-a) (% :player-b))
+    (mapcat)
+    (set)))
 
 (defn get-all-players-win-matrix [win-matrix]
   (set (mapcat #(first %) win-matrix)))
 
 (defn init-win-matrix [results]
-  (def mat (atom {}))
-  (doseq [{:keys [player-a player-b result]} results]
-    (let [pair (case result
-                :win [player-a player-b]
-                :loss [player-b player-a])
-          val (@mat pair)]
-        (if val
-          (swap! mat assoc pair (inc val))
-          (swap! mat assoc pair 1))))
-  @mat)
+  (let [mat (atom {})]
+    (doseq [{:keys [player-a player-b result]} results]
+      (let [pair (case result
+                  :win [player-a player-b]
+                  :loss [player-b player-a])
+            val (@mat pair)]
+          (if val
+            (swap! mat assoc pair (inc val))
+            (swap! mat assoc pair 1))))
+    @mat))
+
 
 (defn log-likelihood-win-matrix [win-matrix ratings]
   (->> win-matrix
@@ -64,10 +68,10 @@
   (init-zeros (get-all-players-win-matrix win-matrix)))
  
 (defn get-total-wins [win-matrix]
-  (def win-map (atom (init-zeros-win-matrix win-matrix)))
-  (doseq [[[player-a player-b] wins] win-matrix]
-    (swap! win-map update player-a (partial + wins)))
-  @win-map)
+  (let [win-map (atom (init-zeros-win-matrix win-matrix))]
+    (doseq [[[player-a player-b] wins] win-matrix]
+      (swap! win-map update player-a (partial + wins)))
+    @win-map))
 
 (def default-zero #(or % 0))
 
@@ -105,17 +109,17 @@
 
 ; optimize all ratings once
 (defn optimize [setup]
-  (def current-ratings @(setup :ratings))
-  (doseq [[player rating] current-ratings]
-    (let [w ((setup :total-wins) player)
-          other-players (disj (setup :players) player)
-          sum-term #(/ 
-                     (get-total-games player % (setup :win-matrix)) 
-                     (+ (current-ratings player) (current-ratings %)))
-          n (apply + (map sum-term other-players))]
-      (swap! (setup :ratings) assoc player (minorize-maximize rating w n (setup :mean) (setup :sd)))))
-  (let [ratings-ref @(setup :ratings)]
-    {:updated-ratings ratings-ref :delta (merge-with - current-ratings ratings-ref)})) 
+  (let [current-ratings @(setup :ratings)]
+    (doseq [[player rating] current-ratings]
+      (let [w ((setup :total-wins) player)
+            other-players (disj (setup :players) player)
+            sum-term #(/ 
+                       (get-total-games player % (setup :win-matrix)) 
+                       (+ (current-ratings player) (current-ratings %)))
+            n (apply + (map sum-term other-players))]
+        (swap! (setup :ratings) assoc player (minorize-maximize rating w n (setup :mean) (setup :sd)))))
+    (let [ratings-ref @(setup :ratings)]
+      {:updated-ratings ratings-ref :delta (merge-with - current-ratings ratings-ref)})))
 
 (defn optimize-until [setup delta-pred]
   (loop [result (optimize setup)]
@@ -131,24 +135,19 @@
     "win" :win
     "loss" :loss)})
 
-(defn write-ratings [ratings]
-  (vec (zipmap (keys ratings) (vals ratings))))
-
 (defn -main [& args]
-  (def csv-file (first args))
-  ; by default, 100 = average
-  (def mean (Float/parseFloat (nth args 1 "100")))
-  ; default st. dev
-  (def sd (Float/parseFloat (nth args 2 "50")))
-  (def results-name (str "results-" csv-file))
-  ; read csv file
-  (with-open [reader (io/reader csv-file)
-              writer (io/writer results-name)]
-    (def results (->> reader
-                  (csv/read-csv)
-                  (mapv read-row)))
-    (def triple {:results results :mean mean :sd sd})
-    (def with-everything (add-everything triple))
-    (optimize-until with-everything standard-pred)              
-    (csv/write-csv writer (write-ratings @(with-everything :ratings))))
-  (println "Optimization done, ratings written to" (str results-name ".")))
+  (let [csv-file (first args)
+        mean (Float/parseFloat (nth args 1 "100"))
+        sd (Float/parseFloat (nth args 2 "50"))
+        results-name (str "results-" csv-file)]
+    ; read csv file
+    (with-open [reader (io/reader csv-file)
+                writer (io/writer results-name)]
+      (let [results (->> reader
+                     (csv/read-csv)
+                     (mapv read-row))
+            triple {:results results :mean mean :sd sd}
+            with-everything (add-everything triple)]
+        (optimize-until with-everything standard-pred)              
+        (csv/write-csv writer (vec @(with-everything :ratings)))))
+    (println "Optimization done, ratings written to" (str results-name "."))))

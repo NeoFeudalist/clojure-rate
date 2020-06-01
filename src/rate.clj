@@ -2,12 +2,40 @@
 (require '[clojure.data.csv :as csv]
          '[clojure.java.io :as io])
 
-(defn log-likelihood-multi
-  [win-a rating-a rating-b]
+(defn log-likelihood-multi [win-a rating-a rating-b]
   (let [log-a (* win-a (Math/log rating-a)) 
         divisor (* win-a (Math/log (+ rating-a rating-b)))]
     (- log-a divisor)))
 
+(def square #(* % %))
+(def cube #(* % % %))
+
+(defn lambert-w-approx [z]
+  (if (> z Math/E)
+    (let [log-z (Math/log z)
+          log-log-z (Math/log log-z)]
+      (- log-z log-log-z))
+   (/ z Math/E)))
+
+(def small-enough-eps 0.00001)
+(def elo-const (/ 400 (Math/log 10)))
+(def inv-elo-const (/ 1 elo-const))
+
+(defn lambert-w [z]
+  (loop [w (lambert-w-approx z)]
+    (let [expw-term (Math/exp w)
+          we-term (- (* w expw-term) z)
+          w1-term (+ w 1)
+          w2-term (+ w 2)
+          w1dbl-term (* 2 w1-term)
+          new-w (- w (/ we-term (- (* expw-term w1-term) (/ (* w2-term we-term) w1dbl-term))))]
+       (if (> (Math/abs (- new-w w)) small-enough-eps)
+          (recur new-w)
+          new-w))))            
+
+(defn to-elo [x]
+  (Math/pow 10 (/ x 400)))
+                      
 (def log-likelihood-single (partial log-likelihood-multi 1))
 
 (defn print-result [{:keys [player-a player-b result]}]
@@ -18,9 +46,8 @@
             player-b ".")))
 
 (defn get-all-players [results]
-  (-> results
-    #(vector (% :player-a) (% :player-b))
-    (mapcat)
+  (->> results
+    (mapcat #(vector (% :player-a) (% :player-b)))
     (set)))
 
 (defn get-all-players-win-matrix [win-matrix]
@@ -46,8 +73,6 @@
                   rating-b (ratings player-b)]
               (log-likelihood-multi wins rating-a rating-b))))
     (apply +)))  
-
-(def square #(* % %))
 
 (defn log-prior [mean sd x]
   (- 0 
@@ -102,10 +127,16 @@
 
 ; use a minorized version of the log-posterior to make it easier to optimize.
 ; then we solve a quadratic equation to optimize it
-(defn minorize-maximize [x w n mean sd]
-  (let [variance (square sd)
-        discrim (+ (* 4 w variance) (square (- mean (* n variance))))]
-    (max machine-epsilon (/ (+ (- (* n variance)) mean (Math/sqrt discrim)) 2))))
+(defn minorize-maximize [w n mean sd]
+  (let [sd2 (square sd)
+        c elo-const
+        ic1 inv-elo-const
+        ic2 (square ic1)
+        term1 (/ (* w sd2) c)
+        exp-factor (Math/exp (+ (* ic2 sd2 w) (* ic1 mean)))
+        lambert-arg (* ic2 sd2 n exp-factor)
+        term2 (- (* c (lambert-w lambert-arg)))]
+    (+ mean term1 term2)))
 
 ; optimize all ratings once
 (defn optimize [setup]
@@ -115,9 +146,9 @@
             other-players (disj (setup :players) player)
             sum-term #(/ 
                        (get-total-games player % (setup :win-matrix)) 
-                       (+ (current-ratings player) (current-ratings %)))
+                       (+ (to-elo (current-ratings player)) (to-elo (current-ratings %))))
             n (apply + (map sum-term other-players))]
-        (swap! (setup :ratings) assoc player (minorize-maximize rating w n (setup :mean) (setup :sd)))))
+        (swap! (setup :ratings) assoc player (minorize-maximize w n (setup :mean) (setup :sd)))))
     (let [ratings-ref @(setup :ratings)]
       {:updated-ratings ratings-ref :delta (merge-with - current-ratings ratings-ref)})))
 
@@ -127,7 +158,7 @@
       result
       (recur (optimize setup)))))
 
-(def standard-pred (comp (partial every? #(<= % 0.00001)) vals))
+(def standard-pred (comp (partial every? #(<= % small-enough-eps)) vals))
 
 (defn read-row [[player-a player-b result]]
   {:player-a player-a :player-b player-b :result 
@@ -137,8 +168,8 @@
 
 (defn -main [& args]
   (let [csv-file (first args)
-        mean (Float/parseFloat (nth args 1 "100"))
-        sd (Float/parseFloat (nth args 2 "50"))
+        mean (Float/parseFloat (nth args 1 "1500"))
+        sd (Float/parseFloat (nth args 2 "350"))
         results-name (str "results-" csv-file)]
     ; read csv file
     (with-open [reader (io/reader csv-file)
